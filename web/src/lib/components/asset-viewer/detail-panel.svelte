@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import DetailPanelDescription from '$lib/components/asset-viewer/detail-panel-description.svelte';
+  import FindSimilar from '$lib/components/asset-viewer/FindSimilar.svelte';
   import DetailPanelLocation from '$lib/components/asset-viewer/detail-panel-location.svelte';
   import DetailPanelRating from '$lib/components/asset-viewer/detail-panel-star-rating.svelte';
   import DetailPanelTags from '$lib/components/asset-viewer/detail-panel-tags.svelte';
@@ -198,6 +199,7 @@
   {/if}
 
   <DetailPanelDescription {asset} {isOwner} />
+  <FindSimilar {asset} />
   <DetailPanelRating {asset} {isOwner} />
 
   {#if !authManager.isSharedLink && isOwner}

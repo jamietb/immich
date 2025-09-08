@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { RawBuilder } from 'kysely';
 import AsyncLock from 'async-lock';
 import { FileMigrationProvider, Kysely, Migrator, sql, Transaction } from 'kysely';
 import { InjectKysely } from 'nestjs-kysely';
@@ -52,6 +53,9 @@ export const probes: Record<VectorIndex, number> = {
 
 @Injectable()
 export class DatabaseRepository {
+public async exec<T = unknown>(q: RawBuilder<T>) {
+  return q.execute(this.db);
+}
   private readonly asyncLock = new AsyncLock();
 
   constructor(

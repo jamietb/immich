@@ -29,9 +29,17 @@ services:
     restart: unless-stopped
     volumes:
       - ..:/usr/src/app
-      - ${UPLOAD_LOCATION}/photos:/data
-      - ${UPLOAD_LOCATION}/photos/upload:/data/upload
+      - ${UPLOAD_LOCATION}:/data
+      - ${THUMB_LOCATION}:/data/thumbs
+      - ${ENCODED_VIDEO_LOCATION}:/data/encoded-video
+      - ${PROFILE_LOCATION}:/data/profile
+      - ${BACKUP_LOCATION}:/data/backups
+      - /mnt/immich-fast/tmp:/tmp
       - /etc/localtime:/etc/localtime:ro
+      - /mnt/media/iphone:/mnt/media/iphone
+      - /mnt/media/hdd-backups/extreme-ssd-1tb:/mnt/media/hdd-backups/extreme-ssd-1tb
+      - /mnt/media/hdd-backups/wd-black-2tb:/mnt/media/hdd-backups/wd-black-2tb
+      - /mnt/media/hdd-backups/sharge-1tb:/mnt/media/hdd-backups/sharge-1tb
     env_file:
       - .env
     environment:
@@ -48,6 +56,10 @@ services:
       IMMICH_THIRD_PARTY_BUG_FEATURE_URL: https://github.com/immich-app/immich/issues
       IMMICH_THIRD_PARTY_DOCUMENTATION_URL: https://immich.app/docs
       IMMICH_THIRD_PARTY_SUPPORT_URL: https://immich.app/docs/community-guides
+      IMMICH_WORKERS_INCLUDE: 'api'
+      IMMICH_MACHINE_LEARNING_URL: http://immich-ml-balancer:80
+      TZ: Europe/London
+      TMPDIR: /tmp
     ulimits:
       nofile:
         soft: 1048576
@@ -66,6 +78,71 @@ services:
     healthcheck:
       disable: false
 
+  immich-microservices:
+    container_name: immich_microservices
+    command: ['immich-dev']
+    image: immich-server-dev:latest
+    user: '${UID:-1000}:${GID:-1000}'
+    build:
+      context: ../
+      dockerfile: server/Dockerfile
+      target: dev
+    restart: unless-stopped
+    volumes:
+      - ..:/usr/src/app
+      - ${UPLOAD_LOCATION}:/data
+      - ${THUMB_LOCATION}:/data/thumbs
+      - ${ENCODED_VIDEO_LOCATION}:/data/encoded-video
+      - ${PROFILE_LOCATION}:/data/profile
+      - ${BACKUP_LOCATION}:/data/backups
+      - /mnt/immich-fast/tmp:/tmp
+      - /etc/localtime:/etc/localtime:ro
+      - /mnt/media/iphone:/mnt/media/iphone
+      - /mnt/media/hdd-backups/extreme-ssd-1tb:/mnt/media/hdd-backups/extreme-ssd-1tb
+      - /mnt/media/hdd-backups/wd-black-2tb:/mnt/media/hdd-backups/wd-black-2tb 
+      - /mnt/media/hdd-backups/sharge-1tb:/mnt/media/hdd-backups/sharge-1tb
+    env_file:
+      - .env
+    environment:
+      IMMICH_REPOSITORY: immich-app/immich
+      IMMICH_REPOSITORY_URL: https://github.com/immich-app/immich
+      IMMICH_SOURCE_REF: local
+      IMMICH_SOURCE_COMMIT: af2efbdbbddc27cd06142f22253ccbbbbeec1f55
+      IMMICH_SOURCE_URL: https://github.com/immich-app/immich/commit/af2efbdbbddc27cd06142f22253ccbbbbeec1f55
+      IMMICH_BUILD: '9654404849'
+      IMMICH_BUILD_URL: https://github.com/immich-app/immich/actions/runs/9654404849
+      IMMICH_BUILD_IMAGE: development
+      IMMICH_BUILD_IMAGE_URL: https://github.com/immich-app/immich/pkgs/container/immich-microservices
+      IMMICH_THIRD_PARTY_SOURCE_URL: https://github.com/immich-app/immich/
+      IMMICH_THIRD_PARTY_BUG_FEATURE_URL: https://github.com/immich-app/immich/issues
+      IMMICH_THIRD_PARTY_DOCUMENTATION_URL: https://immich.app/docs
+      IMMICH_THIRD_PARTY_SUPPORT_URL: https://immich.app/docs/community-guides
+      IMMICH_WORKERS_EXCLUDE: 'api'
+      IMMICH_MACHINE_LEARNING_URL: http://immich-ml-balancer:80
+      TZ: Europe/London
+      TMPDIR: /tmp
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    depends_on:
+      redis:
+        condition: service_started
+      database:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      disable: false
+
+  power-tools:
+    container_name: immich_power_tools
+    image: ghcr.io/varun-raj/immich-power-tools:latest
+    ports:
+      - "8001:3000"
+    env_file:
+      - .env
+
   immich-web:
     container_name: immich_web
     image: immich-web-dev:latest
@@ -79,6 +156,9 @@ services:
     command: ['immich-web']
     env_file:
       - .env
+    environment:
+      VITE_API_URL: http://immich-server:2283
+      VITE_WS_URL: ws://immich-server:2283
     ports:
       - 3000:3000
       - 24678:24678
@@ -95,6 +175,23 @@ services:
       init:
         condition: service_completed_successfully
 
+  immich-ml-balancer:
+    container_name: immich_ml_balancer
+    image: apetersson/immich_ml_balancer:latest # Your custom balancer image
+    environment:
+      # Comma-separated list of immich_ml instance hostnames/IPs.
+      # Format: "hostname_or_ip[:port]"
+      # If port is omitted, it defaults to 3003.
+      IMML_BACKENDS: "immich-machine-learning:3003,10.0.10.244:3003,10.0.40.188:3003,10.0.10.103:3003" # Example with local and a
+      # No ports mapping needed here, as it's accessed via the internal network by immich server on port 80
+      #expose avahi for name resolution on your lan:
+    volumes:
+      - /var/run/dbus:/var/run/dbus               # DBus system bus
+      - /var/run/avahi-daemon/socket:/var/run/avahi-daemon/socket
+    depends_on:
+      - immich-machine-learning # Depend on at least one ML instance for startup order
+    restart: always
+
   immich-machine-learning:
     container_name: immich_machine_learning
     image: immich-machine-learning-dev:latest
@@ -110,12 +207,16 @@ services:
       - 3003:3003
     volumes:
       - ../machine-learning:/usr/src/app
-      - model-cache:/cache
+      - /mnt/immich-fast/ml-cache:/cache
+      - /mnt/immich-fast/tmp:/tmp
     env_file:
       - .env
+    environment:
+      TZ: Europe/London
+      TMPDIR: /tmp
     depends_on:
       - database
-    restart: unless-stopped
+    restart: always
     healthcheck:
       disable: false
 
@@ -136,7 +237,7 @@ services:
       POSTGRES_DB: ${DB_DATABASE_NAME}
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
-      - ${UPLOAD_LOCATION}/postgres:/var/lib/postgresql/data
+      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
     ports:
       - 5432:5432
     shm_size: 128mb

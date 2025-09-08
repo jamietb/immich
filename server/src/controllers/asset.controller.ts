@@ -21,6 +21,48 @@ import { UUIDParamDto } from 'src/validation';
 @ApiTags('Assets')
 @Controller(RouteKey.Asset)
 export class AssetController {
+@Get(':id/similar')
+@Authenticated({ permission: Permission.AssetRead })
+@ApiOperation({ summary: 'Find visually similar assets' })
+async getSimilarAssets(
+  @Auth() auth: AuthDto,
+  @Param() { id }: UUIDParamDto,
+  @Query('types') types?: string,
+  @Query('limit') limit?: string,
+  @Query('offset') offset?: string,
+  @Query('stacksOnly') stacksOnly?: string,
+  @Query('minDate') minDate?: string,
+  @Query('maxDate') maxDate?: string,
+  @Query('albumId') albumId?: string,
+  @Query('cameraMake') cameraMake?: string,
+  @Query('cameraModel') cameraModel?: string,
+) {
+  const parsedTypes =
+    types
+      ? types.split(',').map((t) => t.trim().toUpperCase()).filter((t) => t === 'IMAGE' || t === 'VIDEO')
+      : undefined;
+
+  const parsedLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+  const parsedOffset = Math.max(0, Number(offset) || 0);
+  const parsedStacks = (stacksOnly ?? 'true').toLowerCase() !== 'false';
+
+  const items = await this.service.findSimilarAssets({
+    userId: auth.user.id,
+    assetId: id,
+    types: parsedTypes as any,
+    limit: parsedLimit,
+    offset: parsedOffset,
+    stacksOnly: parsedStacks,
+    minDate: minDate || null,
+    maxDate: maxDate || null,
+    albumId: albumId || null,
+    cameraMake: cameraMake || null,
+    cameraModel: cameraModel || null,
+  });
+
+  return { items };
+}
+
   constructor(private service: AssetService) {}
 
   @Get('random')

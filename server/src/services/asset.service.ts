@@ -1,5 +1,6 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, ForbiddenException } from '@nestjs/common';
 import _ from 'lodash';
+import { sql, RawBuilder } from 'kysely';
 import { DateTime, Duration } from 'luxon';
 import { JOBS_ASSET_PAGINATION_SIZE } from 'src/constants';
 import { OnJob } from 'src/decorators';
@@ -22,6 +23,132 @@ import { getAssetFiles, getMyPartnerIds, onAfterUnlink, onBeforeLink, onBeforeUn
 
 @Injectable()
 export class AssetService extends BaseService {
+/**
+ * Visual similarity using CLIP embeddings (smart_search.embedding).
+ * Returns nearest neighbors ordered by cosine distance (lowest first = most similar).
+ */
+async findSimilarAssets(params: {
+  userId: string;
+  assetId: string;
+  types?: ('IMAGE' | 'VIDEO')[];
+  limit?: number;
+  offset?: number;
+  stacksOnly?: boolean;         // only primary per stack (default true)
+  minDate?: string | null;      // ISO 8601
+  maxDate?: string | null;      // ISO 8601
+  albumId?: string | null;      // restrict within an album
+  cameraMake?: string | null;   // requires asset_exif join
+  cameraModel?: string | null;  // requires asset_exif join
+}) {
+  const {
+    userId,
+    assetId,
+    types,
+    limit = 100,
+    offset = 0,
+    stacksOnly = true,
+    minDate,
+    maxDate,
+    albumId,
+    cameraMake,
+    cameraModel,
+  } = params;
+
+  // 1) Ownership check
+  const owns = await this.databaseRepository.exec(sql`
+    SELECT 1 FROM asset WHERE id = ${assetId} AND "ownerId" = ${userId} LIMIT 1
+  `);
+  if (!owns.rows.length) {
+    throw new ForbiddenException('Asset not found or not accessible');
+  }
+
+  // 2) Base has embedding?
+  const existsRes = await this.databaseRepository.exec<{ ok: boolean }>(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM smart_search WHERE "assetId" = ${assetId} AND embedding IS NOT NULL
+    ) AS ok
+  `);
+  const ok = Boolean((existsRes.rows as Array<{ ok: boolean }>)[0]?.ok);
+  if (!ok) return [];
+
+  // 3) Optional filters
+  let typeFilter: RawBuilder<unknown> = sql``;
+  if (types && types.length) {
+    typeFilter = sql`AND a.type IN (${sql.join(types as any[], sql`,`)})`;
+  }
+
+  const dateFilter =
+    minDate && maxDate
+      ? sql`AND a."localDateTime" BETWEEN ${minDate} AND ${maxDate}`
+      : minDate
+      ? sql`AND a."localDateTime" >= ${minDate}`
+      : maxDate
+      ? sql`AND a."localDateTime" <= ${maxDate}`
+      : sql``;
+
+  const albumJoin = albumId ? sql`
+    JOIN album_asset aa ON aa."assetsId" = a.id AND aa."albumId" = ${albumId}
+  ` : sql``;
+
+  // stack primary only (if enabled)
+  const stackJoin = stacksOnly ? sql`
+    LEFT JOIN stack st ON st.id = a."stackId"
+  ` : sql``;
+  const stackFilter = stacksOnly ? sql`
+    AND (a."stackId" IS NULL OR a.id = st."primaryAssetId")
+  ` : sql``;
+
+  // camera EXIF filter (table name is `asset_exif` with FK "assetId")
+const exifJoin =
+  cameraMake || cameraModel
+    ? sql`LEFT JOIN asset_exif ax ON ax."assetId" = a.id`
+    : sql``;
+
+let exifFilter: RawBuilder<unknown> = sql``;
+if (cameraMake) {
+  exifFilter = sql`${exifFilter} AND ax.make = ${cameraMake}`;
+}
+if (cameraModel) {
+  exifFilter = sql`${exifFilter} AND ax.model = ${cameraModel}`;
+}
+
+  // 4) KNN query
+  const result = await this.databaseRepository.exec(sql`
+    WITH base AS (
+      SELECT embedding FROM smart_search
+      WHERE "assetId" = ${assetId} AND embedding IS NOT NULL
+    )
+    SELECT
+      a.id,
+      a.type,
+      a."deviceAssetId",
+      a."ownerId",
+      (s.embedding <-> base.embedding) AS distance
+    FROM base
+    JOIN smart_search s ON s.embedding IS NOT NULL
+    JOIN asset a        ON a.id = s."assetId"
+    ${albumJoin}
+    ${exifJoin}
+    ${stackJoin}
+    WHERE s."assetId" <> ${assetId}
+      AND a."ownerId" = ${userId}
+      ${typeFilter}
+      ${dateFilter}
+      ${exifFilter}
+      ${stackFilter}
+    ORDER BY s.embedding <-> base.embedding
+    LIMIT ${limit} OFFSET ${offset}
+  `);
+
+  return result.rows as Array<{
+    id: string;
+    type: 'IMAGE' | 'VIDEO';
+    deviceAssetId: string | null;
+    ownerId: string;
+    distance: number;
+  }>;
+}
+
   async getStatistics(auth: AuthDto, dto: AssetStatsDto) {
     if (dto.visibility === AssetVisibility.Locked) {
       requireElevatedPermission(auth);
