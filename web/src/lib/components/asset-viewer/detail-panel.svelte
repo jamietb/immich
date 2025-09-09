@@ -1,4 +1,5 @@
 <script lang="ts">
+  import RecentAlbumsStrip from '$lib/components/asset-viewer/recent-albums-strip.svelte';
   import { goto } from '$app/navigation';
   import DetailPanelDescription from '$lib/components/asset-viewer/detail-panel-description.svelte';
   import FindSimilar from '$lib/components/asset-viewer/FindSimilar.svelte';
@@ -201,6 +202,7 @@
   <DetailPanelDescription {asset} {isOwner} />
   <FindSimilar {asset} />
   <DetailPanelRating {asset} {isOwner} />
+  <RecentAlbumsStrip {asset} />
 
   {#if !authManager.isSharedLink && isOwner}
     <section class="px-4 pt-4 text-sm">
