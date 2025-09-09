@@ -2,6 +2,57 @@
   import { page } from '$app/state';
   import { onMount } from 'svelte';
 
+import { goto } from '$app/navigation';
+import { createSimilarSession } from '$lib/stores/similar-session';
+
+let selected = $state<Set<string>>(new Set());
+
+function toggle(id: string) {
+  selected.has(id) ? selected.delete(id) : selected.add(id);
+  selected = new Set(selected);
+}
+function selectAll() { selected = new Set(items.map((x) => x.id)); }
+function clearSel()  { selected = new Set(); }
+
+async function addSelectionToExistingAlbum(targetAlbumId: string) {
+  if (!selected.size) { alert('Select at least one asset'); return; }
+  if (!targetAlbumId?.trim()) { alert('Enter an Album ID'); return; }
+  const res = await fetch(`/api/albums/${targetAlbumId}/assets`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ assetIds: Array.from(selected) }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    console.error('Add to album failed:', res.status, t);
+    alert(`Add to album failed (${res.status})`);
+  } else {
+    alert('Added to album');
+  }
+}
+
+async function createAlbumFromSelection(newAlbumName: string) {
+  if (!selected.size) { alert('Select at least one asset'); return; }
+  if (!newAlbumName?.trim()) { alert('Enter an Album name'); return; }
+  const res = await fetch('/api/albums', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      albumName: newAlbumName.trim(),
+      assetIds: Array.from(selected),
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    console.error('Create album failed:', res.status, t);
+    alert(`Create album failed (${res.status})`);
+  } else {
+    alert('Album created');
+  }
+}
+
   // Route params and initial query
   const params = $derived(page.params);
   const search = $derived(page.url.searchParams);
@@ -126,6 +177,50 @@
   onMount(() => {
     fetchPage(true);
   });
+
+// --- Hover video helpers ---
+
+// Track which candidate URL we're on, per asset id
+const srcIndexById = new Map<string, number>();
+
+// Build possible video URLs for this asset.
+// Order matters: we'll try them in sequence until one works on this install.
+function videoCandidates(a: { id: string; type: 'IMAGE' | 'VIDEO'; livePhotoVideoId?: string | null }) {
+  // If it's a Live Photo still with an attached video, prefer that
+  const vidId = a.livePhotoVideoId && a.type === 'IMAGE' ? a.livePhotoVideoId : a.id;
+
+  // Common Immich endpoints; your build might use one of these.
+  // If your normal search grid plays video on hover, copy its URL and put it first here.
+  return [
+    `/api/assets/${vidId}/video/playback`,   // alt playback
+    `/api/assets/${vidId}/video/stream`,     // common in recent builds
+    `/api/assets/${vidId}/video`,            // older route
+  ];
+}
+
+function currentVideoSrc(a: { id: string; type: string; livePhotoVideoId?: string | null }) {
+  const list = videoCandidates(a);
+  const idx = srcIndexById.get(a.id) ?? 0;
+  return list[Math.min(idx, list.length - 1)];
+}
+
+// When a <video> fails to load, bump to the next candidate and reload.
+function onVideoError(a: { id: string }, el: HTMLVideoElement) {
+  const curr = srcIndexById.get(a.id) ?? 0;
+  const next = curr + 1;
+  srcIndexById.set(a.id, next);
+  // Swap <source> src and reload
+  const source = el.querySelector('source') as HTMLSourceElement | null;
+  if (source) {
+    source.src = currentVideoSrc(a as any);
+    el.load(); // re-evaluate sources
+  }
+}
+
+function isLivePhoto(a: { type: string; livePhotoVideoId?: string | null }) {
+  return a.type === 'IMAGE' && !!a.livePhotoVideoId;
+}
+
 </script>
 
 <div class="px-4 py-4 sm:px-6">
@@ -145,6 +240,30 @@
         <option value="video">Videos only</option>
       </select>
     </div>
+
+<!-- Selection toolbar -->
+<div class="flex flex-wrap items-center gap-3 mb-3 text-sm">
+  <button class="btn btn-secondary" on:click={selectAll}>Select all</button>
+  <button class="btn btn-secondary" on:click={clearSel}>Clear</button>
+
+  <!-- Add to an existing album by ID -->
+  <div class="flex items-center gap-2">
+    <input id="albumIdInput" class="border rounded px-2 py-1 bg-transparent" placeholder="Album ID…" />
+    <button class="btn btn-primary" disabled={!selected.size}
+      on:click={() => addSelectionToExistingAlbum((document.getElementById('albumIdInput') as HTMLInputElement).value)}>
+      Add to existing ({selected.size})
+    </button>
+  </div>
+
+  <!-- Create a brand new album by name -->
+  <div class="flex items-center gap-2">
+    <input id="albumNameInput" class="border rounded px-2 py-1 bg-transparent" placeholder="New album name…" />
+    <button class="btn btn-primary" disabled={!selected.size}
+      on:click={() => createAlbumFromSelection((document.getElementById('albumNameInput') as HTMLInputElement).value)}>
+      Create album from selection
+    </button>
+  </div>
+</div>
 
     <div class="flex items-center gap-2">
       <label>Stacks primary only:</label>
@@ -209,21 +328,75 @@
   {#if !groupByType}
     <!-- Flat grid -->
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
-      {#each items as a}
-        <a href={`/photos/${a.id}`} class="relative block group">
-          <img
-            src={`/api/assets/${a.id}/thumbnail?size=preview`}
-            alt=""
-            loading="lazy"
-            class="w-full h-auto rounded-md"
-          />
-          {#if a.distance != null}
-            <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
-              {score(a.distance)}%
-            </div>
-          {/if}
-        </a>
-      {/each}
+{#each items as a}
+  <div
+    role="link"
+    class="relative block group cursor-pointer"
+    on:click={() => {
+      const ids = items.map((x) => x.id);
+      const index = ids.indexOf(a.id);
+      createSimilarSession({
+        baseId: assetId,
+        ids,
+        index,
+        meta: { types, stacksOnly, minDate, maxDate, albumId, cameraMake, cameraModel },
+      });
+      goto(`/photos/${a.id}?similar=1`);
+    }}
+  >
+    <!-- selection checkbox -->
+    <div class="absolute top-1 left-1 bg-black/50 rounded px-1 py-0.5 z-10">
+      <input
+        type="checkbox"
+        checked={selected.has(a.id)}
+        on:click|stopPropagation
+        on:change={() => toggle(a.id)}
+      />
+    </div>
+
+  <!-- LIVE badge -->
+  {#if isLivePhoto(a)}
+    <div class="absolute top-1 right-1 z-10">
+      <span class="rounded-full bg-amber-500/90 text-white text-[10px] leading-none px-2 py-1 shadow dark:bg-amber-400/90"
+            title="Live Photo" aria-label="Live Photo">LIVE</span>
+    </div>
+  {/if}
+
+    <!-- video hover-to-play; image fallback -->
+{#if a.type === 'VIDEO' || (a.type === 'IMAGE' && a.livePhotoVideoId)}
+  <video
+    muted
+    playsinline
+    preload="metadata"
+    crossorigin="use-credentials"
+    class="w-full h-auto rounded-md"
+    poster={`/api/assets/${a.id}/thumbnail?size=preview`}
+    on:error={(e) => onVideoError(a, e.currentTarget as HTMLVideoElement)}
+    on:mouseenter={(e) => (e.currentTarget as HTMLVideoElement).play()}
+    on:mouseleave={(e) => {
+      const v = e.currentTarget as HTMLVideoElement;
+      v.pause();
+      v.currentTime = 0;
+    }}
+  >
+    <source src={currentVideoSrc(a)} type="video/mp4" />
+  </video>
+{:else}
+  <img
+    src={`/api/assets/${a.id}/thumbnail?size=preview`}
+    alt=""
+    loading="lazy"
+    class="w-full h-auto rounded-md"
+  />
+{/if}
+
+    {#if a.distance != null}
+      <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
+        {score(a.distance)}%
+      </div>
+    {/if}
+  </div>
+{/each}
     </div>
   {:else}
     <!-- Grouped: Photos -->
@@ -233,19 +406,73 @@
       </h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
         {#each photosItems as a}
-          <a href={`/photos/${a.id}`} class="relative block group">
-            <img
-              src={`/api/assets/${a.id}/thumbnail?size=preview`}
-              alt=""
-              loading="lazy"
-              class="w-full h-auto rounded-md"
-            />
-            {#if a.distance != null}
-              <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
-                {score(a.distance)}%
-              </div>
-            {/if}
-          </a>
+      <div
+        role="link"
+        class="relative block group cursor-pointer"
+        on:click={() => {
+          const ids = items.map((x) => x.id);
+          const index = ids.indexOf(a.id);
+          createSimilarSession({
+            baseId: assetId,
+            ids,
+            index,
+            meta: { types, stacksOnly, minDate, maxDate, albumId, cameraMake, cameraModel },
+          });
+          goto(`/photos/${a.id}?similar=1`);
+        }}
+      >
+        <!-- selection checkbox -->
+        <div class="absolute top-1 left-1 bg-black/50 rounded px-1 py-0.5 z-10">
+          <input
+            type="checkbox"
+            checked={selected.has(a.id)}
+            on:click|stopPropagation
+            on:change={() => toggle(a.id)}
+          />
+        </div>
+
+  <!-- LIVE badge -->
+  {#if isLivePhoto(a)}
+    <div class="absolute top-1 right-1 z-10">
+      <span class="rounded-full bg-amber-500/90 text-white text-[10px] leading-none px-2 py-1 shadow dark:bg-amber-400/90"
+            title="Live Photo" aria-label="Live Photo">LIVE</span>
+    </div>
+  {/if}
+
+        <!-- photo thumbnail -->
+{#if a.type === 'IMAGE' && a.livePhotoVideoId}
+  <video
+    muted
+    playsinline
+    preload="metadata"
+    crossorigin="use-credentials"
+    class="w-full h-auto rounded-md"
+    poster={`/api/assets/${a.id}/thumbnail?size=preview`}
+    on:error={(e) => onVideoError(a, e.currentTarget as HTMLVideoElement)}
+    on:mouseenter={(e) => (e.currentTarget as HTMLVideoElement).play()}
+    on:mouseleave={(e) => {
+      const v = e.currentTarget as HTMLVideoElement;
+      v.pause();
+      v.currentTime = 0;
+    }}
+  >
+    <source src={currentVideoSrc(a)} type="video/mp4" />
+  </video>
+{:else}
+  <img
+    src={`/api/assets/${a.id}/thumbnail?size=preview`}
+    alt=""
+    loading="lazy"
+    class="w-full h-auto rounded-md"
+  />
+{/if}
+
+        {#if a.distance != null}
+          <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
+            {score(a.distance)}%
+          </div>
+        {/if}
+      </div>
         {/each}
       </div>
     {/if}
@@ -257,19 +484,56 @@
       </h2>
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
         {#each videosItems as a}
-          <a href={`/photos/${a.id}`} class="relative block group">
-            <img
-              src={`/api/assets/${a.id}/thumbnail?size=preview`}
-              alt=""
-              loading="lazy"
-              class="w-full h-auto rounded-md"
-            />
-            {#if a.distance != null}
-              <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
-                {score(a.distance)}%
-              </div>
-            {/if}
-          </a>
+      <div
+        role="link"
+        class="relative block group cursor-pointer"
+        on:click={() => {
+          const ids = items.map((x) => x.id);
+          const index = ids.indexOf(a.id);
+          createSimilarSession({
+            baseId: assetId,
+            ids,
+            index,
+            meta: { types, stacksOnly, minDate, maxDate, albumId, cameraMake, cameraModel },
+          });
+          goto(`/photos/${a.id}?similar=1`);
+        }}
+      >
+        <!-- selection checkbox -->
+        <div class="absolute top-1 left-1 bg-black/50 rounded px-1 py-0.5 z-10">
+          <input
+            type="checkbox"
+            checked={selected.has(a.id)}
+            on:click|stopPropagation
+            on:change={() => toggle(a.id)}
+          />
+        </div>
+
+        <!-- video hover-to-play -->
+<video
+  muted
+  playsinline
+  preload="metadata"
+  crossorigin="use-credentials"
+  class="w-full h-auto rounded-md"
+  poster={`/api/assets/${a.id}/thumbnail?size=preview`}
+  on:error={(e) => onVideoError(a, e.currentTarget as HTMLVideoElement)}
+  on:mouseenter={(e) => (e.currentTarget as HTMLVideoElement).play()}
+  on:mouseleave={(e) => {
+    const v = e.currentTarget as HTMLVideoElement;
+    v.pause();
+    v.currentTime = 0;
+  }}
+>
+  <source src={currentVideoSrc(a)} type="video/mp4" />
+</video>
+
+        {#if a.distance != null}
+          <div class="absolute top-1 right-1 rounded bg-black/60 text-white text-[10px] px-1.5 py-0.5">
+            {score(a.distance)}%
+          </div>
+        {/if}
+      </div>
         {/each}
       </div>
     {/if}
