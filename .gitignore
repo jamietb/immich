@@ -28,6 +28,6 @@ vite.config.js.timestamp-*
 docker/postgres/
 *.dump
 docker/redis/
-
+server/dist/
 uploads/
 tmp/
